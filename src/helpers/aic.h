@@ -1,6 +1,7 @@
 #pragma once
 
 #include <furi.h>
+#include <mbedtls/des.h>
 #include <lib/nfc/protocols/felica/felica.h>
 
 static uint8_t S_BOX_INV[9][256] = {
@@ -300,5 +301,13 @@ AICVendor aic_vendor(const FelicaData* data) {
         return AICVendorReservedForTesting;
     default:
         return AICVendorUnknown;
+    }
+    
+}
+static const char aic_iso_alphabet[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXY";
+
+static inline void aic_access_code_iso15693(const uint8_t* uid, char* out_access_code) {
+    for(int i = 0; i < 8; i++) {
+        snprintf(out_access_code + (i * 2), 3, "%02X", uid[i]);
     }
 }

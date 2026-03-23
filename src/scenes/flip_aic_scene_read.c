@@ -3,6 +3,7 @@
 
 #include <lib/nfc/protocols/felica/felica.h>
 #include <lib/nfc/protocols/felica/felica_poller.h>
+#include <lib/nfc/protocols/iso15693_3/iso15693_3_poller.h> // 修正头文件路径
 
 enum PollerResult {
     PollerResultSuccess,
@@ -13,35 +14,37 @@ static NfcCommand flip_aic_scene_read_poller_callback(NfcGenericEvent event, voi
     furi_assert(context);
     FlipAIC* app = context;
 
-    FelicaPollerEvent* poller_event = event.event_data;
-    FURI_LOG_I(TAG, "Poller event: %d", poller_event->type);
-
-    switch (poller_event->type) {
-    case FelicaPollerEventTypeReady:
-    case FelicaPollerEventTypeIncomplete:
-        view_dispatcher_send_custom_event(app->view_dispatcher, PollerResultSuccess);
-        return NfcCommandStop;
-
-    case FelicaPollerEventTypeError:
-        FURI_LOG_I(TAG, "Error: %d", poller_event->data->error);
-        view_dispatcher_send_custom_event(app->view_dispatcher, PollerResultFailure);
-        return NfcCommandStop;
-
-    case FelicaPollerEventTypeRequestAuthContext:
-        poller_event->data->auth_context->skip_auth = true;
-        return NfcCommandContinue;
+    if (event.protocol == NfcProtocolFelica) {
+        FelicaPollerEvent* poller_event = event.event_data;
+        switch (poller_event->type) {
+        case FelicaPollerEventTypeReady:
+        case FelicaPollerEventTypeIncomplete:
+            view_dispatcher_send_custom_event(app->view_dispatcher, PollerResultSuccess);
+            return NfcCommandStop;
+        case FelicaPollerEventTypeError:
+            view_dispatcher_send_custom_event(app->view_dispatcher, PollerResultFailure);
+            return NfcCommandStop;
+        case FelicaPollerEventTypeRequestAuthContext:
+            poller_event->data->auth_context->skip_auth = true;
+            return NfcCommandContinue;
+        default:
+            return NfcCommandContinue;
+        }
+    } else if (event.protocol == NfcProtocolIso15693_3) { 
+        Iso15693_3PollerEvent* poller_event = event.event_data;
+        if (poller_event->type == Iso15693_3PollerEventTypeReady) {
+            view_dispatcher_send_custom_event(app->view_dispatcher, PollerResultSuccess);
+            return NfcCommandStop;
+        }
     }
-
-    return NfcCommandContinue; // why is this needed????
+    return NfcCommandContinue;
 }
 
 void flip_aic_scene_read_on_enter(void* context) {
     furi_assert(context);
     FlipAIC* app = context;
 
-    app->nfc_poller = nfc_poller_alloc(app->nfc, NfcProtocolFelica);
-
-    FURI_LOG_I(TAG, "Starting poller");
+    app->nfc_poller = nfc_poller_alloc(app->nfc, app->current_protocol);
     nfc_poller_start(app->nfc_poller, flip_aic_scene_read_poller_callback, app);
 
     view_dispatcher_switch_to_view(app->view_dispatcher, FlipAICViewLoading);
@@ -56,7 +59,7 @@ bool flip_aic_scene_read_on_event(void* context, SceneManagerEvent event) {
         case PollerResultSuccess:
             nfc_device_set_data(
                 app->nfc_device,
-                NfcProtocolFelica,
+                app->current_protocol,
                 nfc_poller_get_data(app->nfc_poller)
             );
             scene_manager_next_scene(app->scene_manager, FlipAICSceneDisplay);
@@ -67,7 +70,6 @@ bool flip_aic_scene_read_on_event(void* context, SceneManagerEvent event) {
             return true;
         }
     }
-
     return false;
 }
 
@@ -75,7 +77,6 @@ void flip_aic_scene_read_on_exit(void* context) {
     furi_assert(context);
     FlipAIC* app = context;
 
-    FURI_LOG_I(TAG, "Stopping poller");
     nfc_poller_stop(app->nfc_poller);
     nfc_poller_free(app->nfc_poller);
 }
