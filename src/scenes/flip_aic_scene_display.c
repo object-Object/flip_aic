@@ -43,7 +43,7 @@ void flip_aic_scene_display_on_enter(void* context) {
     NfcProtocol protocol = nfc_device_get_protocol(app->nfc_device);
     FuriString* text = furi_string_alloc();
 
-    if (protocol == NfcProtocolFelica) {
+if (protocol == NfcProtocolFelica) {
         const FelicaData* data = nfc_device_get_data(app->nfc_device, NfcProtocolFelica);
         AICVendor vendor = aic_vendor(data);
         const char* vendor_name = aic_vendor_name_short(vendor);
@@ -51,13 +51,18 @@ void flip_aic_scene_display_on_enter(void* context) {
 
         uint8_t access_code[10];
         aic_access_code(data, access_code);
-        furi_string_cat_str(text, "Access code:\n");
-        furi_string_cat_hex(text, access_code, sizeof(access_code), " ", 2);
+        furi_string_cat_str(text, "AIC: ");
+        furi_string_cat_hex(text, access_code, sizeof(access_code), "", 2);
+
+        char konami_id[17];
+        aic_access_code_felica_konami(data->idm.data, konami_id);
+        furi_string_cat_str(text, "\nKID: ");
+        furi_string_cat_str(text, konami_id);
 
         furi_string_cat_str(text, "\nIDm: ");
         furi_string_cat_hex(text, data->idm.data, sizeof(data->idm.data), ":", 1);
-    } 
-    else if (protocol == NfcProtocolIso15693_3) { // 修正宏
+    }
+    else if (protocol == NfcProtocolIso15693_3) { 
         const Iso15693_3Data* data = nfc_device_get_data(app->nfc_device, NfcProtocolIso15693_3);
         dialog_ex_set_header(app->dialog_ex, "e-amusement", 0, 0, AlignLeft, AlignTop);
 
