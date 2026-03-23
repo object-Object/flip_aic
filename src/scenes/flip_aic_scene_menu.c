@@ -2,8 +2,7 @@
 #include "flip_aic_scene.h"
 
 enum SubmenuIndex {
-    SubmenuIndexReadFelica,
-    SubmenuIndexReadIso15693,
+    SubmenuIndexReadAuto,
     SubmenuIndexSaved,
 };
 
@@ -17,8 +16,8 @@ void flip_aic_scene_menu_on_enter(void* context) {
     furi_assert(context);
     FlipAIC* app = context;
 
-    submenu_add_item(app->submenu, "Read FeliCa (Amusement IC)", SubmenuIndexReadFelica, flip_aic_scene_menu_submenu_callback, app);
-    submenu_add_item(app->submenu, "Read ISO15693_3 (Legacy)", SubmenuIndexReadIso15693, flip_aic_scene_menu_submenu_callback, app);
+    // 整合为一个 Auto-detect 选项
+    submenu_add_item(app->submenu, "Read Card (Auto-detect)", SubmenuIndexReadAuto, flip_aic_scene_menu_submenu_callback, app);
     submenu_add_item(app->submenu, "Saved", SubmenuIndexSaved, flip_aic_scene_menu_submenu_callback, app);
 
     submenu_set_selected_item(app->submenu, scene_manager_get_scene_state(app->scene_manager, FlipAICSceneMenu));
@@ -32,12 +31,8 @@ bool flip_aic_scene_menu_on_event(void* context, SceneManagerEvent event) {
     if (event.type == SceneManagerEventTypeCustom) {
         scene_manager_set_scene_state(app->scene_manager, FlipAICSceneMenu, event.event);
         switch (event.event) {
-        case SubmenuIndexReadFelica:
-            app->current_protocol = NfcProtocolFelica;
-            scene_manager_next_scene(app->scene_manager, FlipAICSceneRead);
-            return true;
-        case SubmenuIndexReadIso15693:
-            app->current_protocol = NfcProtocolIso15693_3; 
+        case SubmenuIndexReadAuto:
+            app->current_protocol = NfcProtocolFelica; // 默认先从 FeliCa 开始轮询
             scene_manager_next_scene(app->scene_manager, FlipAICSceneRead);
             return true;
         case SubmenuIndexSaved:
