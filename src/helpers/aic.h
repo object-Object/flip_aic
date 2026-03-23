@@ -1,7 +1,8 @@
 #pragma once
 
 #include <furi.h>
-#include <mbedtls/des.h>
+// #include <mbedtls/des.h>
+#include "des_epass.h"
 #include <lib/nfc/protocols/felica/felica.h>
 
 static uint8_t S_BOX_INV[9][256] = {
@@ -304,10 +305,72 @@ AICVendor aic_vendor(const FelicaData* data) {
     }
     
 }
-static const char aic_iso_alphabet[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXY";
+
+static const char aic_iso_alphabet[] = "0123456789ABCDEFGHJKLMNPRSTUWXYZ";
+
+// From https://eamuse.bsnk.me/cardid.html 
+static uint8_t bsnk_checksum(const uint8_t* bytes) {
+    uint32_t chk = 0;
+    for (int i = 0; i <= 14; i++) {
+        chk += bytes[i] * ((i % 3) + 1);
+    }
+    while (chk > 31) {
+        chk = (chk >> 5) + (chk & 31);
+    }
+    return (uint8_t)chk;
+}
 
 static inline void aic_access_code_iso15693(const uint8_t* uid, char* out_access_code) {
-    for(int i = 0; i < 8; i++) {
-        snprintf(out_access_code + (i * 2), 3, "%02X", uid[i]);
+    const uint8_t raw_key[24] = "?I'llB2c.YouXXXeMeHaYpy!";
+    uint8_t key_data[24];
+    
+    // 密钥左移 1 位预处理
+    for(int i = 0; i < 24; i++) {
+        key_data[i] = (uint8_t)(raw_key[i % 24] << 1);
     }
+
+    uint32_t KEY_DATA_ARRAY[96] = {0};
+    des3_setkey(KEY_DATA_ARRAY, key_data);
+
+    //Reverse UID
+    uint8_t reversed_uid[8];
+    for(int i = 0; i < 8; i++) {
+        reversed_uid[i] = uid[7 - i];
+    }
+
+    // 2. 运行 3DES 加密 (加密 -> 解密 -> 加密)
+    uint8_t encrypted[8];
+    des_small_flips_encrypt(KEY_DATA_ARRAY, encrypted, reversed_uid);
+    des_small_flips_decrypt(KEY_DATA_ARRAY + 32, encrypted, encrypted);
+    des_small_flips_encrypt(KEY_DATA_ARRAY + 64, encrypted, encrypted);
+
+    // 3. 将 64 位密文进行 5-bit 解包 (Unpacking) 到 13 个数值
+    uint8_t out[16] = {0};
+    for (int i = 0; i < 13; i++) {
+        int bit_offset = i * 5;
+        int byte_index = bit_offset / 8;
+        int bit_shift = bit_offset % 8;
+        
+        // 拼接相邻两个字节以防跨界提取
+        uint16_t word = (encrypted[byte_index] << 8) | (byte_index + 1 < 8 ? encrypted[byte_index + 1] : 0);
+        out[i] = (word >> (16 - bit_shift - 5)) & 0x1F;
+    }
+
+    // 4. 应用卡片校验位与连续 XOR 混淆
+    uint8_t card_type = 1; // E004 磁条卡类型固定为 1
+    out[0] ^= card_type;
+    out[13] = 1; // 填充 Encoding Check 位
+    
+    for (int i = 1; i <= 13; i++) {
+        out[i] ^= out[i - 1];
+    }
+    
+    out[14] = card_type;
+    out[15] = bsnk_checksum(out);
+
+    // 5. 映射至最终的 16 位大写字典
+    for(int i = 0; i < 16; i++) {
+        out_access_code[i] = aic_iso_alphabet[out[i]];
+    }
+    out_access_code[16] = '\0';
 }
