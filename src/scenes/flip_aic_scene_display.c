@@ -6,8 +6,8 @@
 
 #include <lib/nfc/protocols/felica/felica.h>
 #include <lib/nfc/protocols/iso15693_3/iso15693_3.h>
+#include <lib/nfc/protocols/mf_classic/mf_classic.h>
 
-// 增加了一个新的事件类型：再次读卡
 enum FlipAICSceneDisplayEvent {
     FlipAICSceneDisplayEventMenu,
     FlipAICSceneDisplayEventReadAgain, 
@@ -45,15 +45,21 @@ void flip_aic_scene_display_on_enter(void* context) {
 
         uint8_t access_code[10];
         aic_access_code(data, access_code);
-        furi_string_cat_str(text, "AIC: ");
-        furi_string_cat_hex(text, access_code, sizeof(access_code), "", 2);
+        char aic_str[21];
+        for(int i = 0; i < 10; i++) {
+            snprintf(aic_str + i * 2, 3, "%02X", access_code[i]);
+        }
+
 
         char konami_id[17];
         aic_access_code_felica_konami(data->idm.data, konami_id);
-        furi_string_cat_str(text, "\nKID: ");
-        furi_string_cat_str(text, konami_id);
+        furi_string_printf(text, 
+            "%.4s %.4s %.4s %.4s %.4s\nKID:%.4s %.4s %.4s %.4s",
+            aic_str, aic_str+4, aic_str+8, aic_str+12, aic_str+16,
+            konami_id, konami_id+4, konami_id+8, konami_id+12
+        );
 
-        furi_string_cat_str(text, "\nIDm: ");
+        furi_string_cat_str(text, "\nIDm:");
         furi_string_cat_hex(text, data->idm.data, sizeof(data->idm.data), ":", 1);
 
         // 【核心修改】进入界面时，若 USB 已连接，则直接自动发送！
@@ -68,24 +74,25 @@ void flip_aic_scene_display_on_enter(void* context) {
         char access_code_str[21];
         aic_access_code_iso15693(data->uid, access_code_str);
         
-        furi_string_cat_str(text, "KID: ");
-        furi_string_cat_str(text, access_code_str);
+        furi_string_printf(text, 
+            "KID:%.4s %.4s %.4s %.4s",
+            access_code_str, access_code_str+4, access_code_str+8, access_code_str+12
+        );
 
         furi_string_cat_str(text, "\nUID: ");
         furi_string_cat_hex(text, data->uid, sizeof(data->uid), ":", 1);
 
-        // 【核心修改】进入界面时，若 USB 已连接，则直接自动发送！
         if (cardio_is_connected()) {
             cardio_send_report(CardioReportIdISO15693, data->uid);
         }
     }
-
+    
     dialog_ex_set_text(app->dialog_ex, furi_string_get_cstr(text), 0, 12, AlignLeft, AlignTop);
     furi_string_free(text);
 
     // 更新按钮文字
     dialog_ex_set_left_button_text(app->dialog_ex, "Menu");
-    dialog_ex_set_center_button_text(app->dialog_ex, "Read Next"); // 提示用户点击可以连扫
+    dialog_ex_set_center_button_text(app->dialog_ex, "Read Next"); 
 
     dialog_ex_set_result_callback(app->dialog_ex, flip_aic_scene_display_dialog_callback);
     dialog_ex_set_context(app->dialog_ex, app);
