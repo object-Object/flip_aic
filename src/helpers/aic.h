@@ -1,6 +1,8 @@
 #pragma once
 
 #include <furi.h>
+// #include <mbedtls/des.h>
+#include "des_epass.h"
 #include <lib/nfc/protocols/felica/felica.h>
 
 static uint8_t S_BOX_INV[9][256] = {
@@ -301,4 +303,124 @@ AICVendor aic_vendor(const FelicaData* data) {
     default:
         return AICVendorUnknown;
     }
+    
+}
+
+static const char aic_iso_alphabet[] = "0123456789ABCDEFGHJKLMNPRSTUWXYZ";
+
+// From https://eamuse.bsnk.me/cardid.html 
+static uint8_t bsnk_checksum(const uint8_t* bytes) {
+    uint32_t chk = 0;
+    for (int i = 0; i <= 14; i++) {
+        chk += bytes[i] * ((i % 3) + 1);
+    }
+    while (chk > 31) {
+        chk = (chk >> 5) + (chk & 31);
+    }
+    return (uint8_t)chk;
+}
+
+static inline void aic_access_code_konami_core(const uint8_t* uid, uint8_t card_type, char* out_access_code) {
+    const uint8_t raw_key[24] = "?I'llB2c.YouXXXeMeHaYpy!";
+    uint8_t key_data[24];
+    
+    for(int i = 0; i < 24; i++) {
+        key_data[i] = (uint8_t)(raw_key[i % 24] << 1);
+    }
+
+    uint32_t KEY_DATA_ARRAY[96] = {0};
+    des3_setkey(KEY_DATA_ARRAY, key_data);
+
+    uint8_t reversed_uid[8];
+    for(int i = 0; i < 8; i++) {
+        reversed_uid[i] = uid[7 - i];
+    }
+
+    uint8_t encrypted[8];
+    des_small_flips_encrypt(KEY_DATA_ARRAY, encrypted, reversed_uid);
+    des_small_flips_decrypt(KEY_DATA_ARRAY + 32, encrypted, encrypted);
+    des_small_flips_encrypt(KEY_DATA_ARRAY + 64, encrypted, encrypted);
+
+    uint8_t out[16] = {0};
+    for (int i = 0; i < 13; i++) {
+        int bit_offset = i * 5;
+        int byte_index = bit_offset / 8;
+        int bit_shift = bit_offset % 8;
+        uint16_t word = (encrypted[byte_index] << 8) | (byte_index + 1 < 8 ? encrypted[byte_index + 1] : 0);
+        out[i] = (word >> (16 - bit_shift - 5)) & 0x1F;
+    }
+
+    out[0] ^= card_type;
+    out[13] = 1; 
+    
+    for (int i = 1; i <= 13; i++) {
+        out[i] ^= out[i - 1];
+    }
+    
+    out[14] = card_type;
+    out[15] = bsnk_checksum(out);
+
+    for(int i = 0; i < 16; i++) {
+        out_access_code[i] = aic_iso_alphabet[out[i]];
+    }
+    out_access_code[16] = '\0';
+}
+
+//ISO15693
+static inline void aic_access_code_iso15693(const uint8_t* uid, char* out_access_code) {
+    aic_access_code_konami_core(uid, 1, out_access_code);
+}
+
+// Felica
+static inline void aic_access_code_felica_konami(const uint8_t* idm, char* out_access_code) {
+    aic_access_code_konami_core(idm, 2, out_access_code);
+}
+
+// Amusement IC (AIC) support, ported from the firmware's amusement_ic parser.
+// Only FeliCa Lite / Lite-S cards with a known vendor DFC carry an AIC access code.
+// Suica and other FeliCa Standard cards deliberately return false here.
+static inline bool aic_is_supported_card(const FelicaData* data) {
+    if(data == NULL) return false;
+
+    const uint8_t ic_type = data->pmm.data[1];
+    if(ic_type != 0xF0 && ic_type != 0xF1) return false; // Lite / Lite-S only
+
+    if(data->data.fs.id.data[8] != 0x00) return false; // DFC high byte
+
+    switch(data->data.fs.id.data[9]) {
+    case 0x2A: // Bandai Namco Entertainment (Lite-S)
+    case 0x3A: // Bandai Namco Games (Lite)
+    case 0x68: // Konami (Lite-S)
+    case 0x78: // SEGA (Lite-S)
+    case 0x79: // Taito NESiCA
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Decrypts SPAD0 and returns the 20-digit BCD access number (company code 5xx +
+// encoded data + CRC). out_access_number must hold at least 21 bytes.
+static inline bool aic_get_access_number(const FelicaData* data, char* out_access_number) {
+    if(data == NULL || out_access_number == NULL) return false;
+    if(!aic_is_supported_card(data)) return false;
+
+    // SPAD0 must actually have been read, otherwise the decrypted data is garbage
+    if(data->blocks_read == 0) return false;
+
+    // decrypted SPAD0 bytes 6..15 == the 10-byte / 20-digit access code
+    uint8_t access_code[10];
+    aic_access_code(data, access_code);
+
+    if((access_code[0] >> 4) != 5) return false; // AIC company code always starts with 5
+
+    for(int i = 0; i < 10; i++) {
+        uint8_t hi = (access_code[i] >> 4) & 0x0F;
+        uint8_t lo = access_code[i] & 0x0F;
+        if(hi > 9 || lo > 9) return false; // not BCD
+        out_access_number[i * 2] = (char)('0' + hi);
+        out_access_number[i * 2 + 1] = (char)('0' + lo);
+    }
+    out_access_number[20] = '\0';
+    return true;
 }

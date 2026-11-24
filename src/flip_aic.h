@@ -38,6 +38,8 @@ typedef struct {
     Nfc* nfc;
     NfcPoller* nfc_poller;
     NfcDevice* nfc_device;
+    NfcProtocol current_protocol;
+    FuriTimer* timer;
     // NfcListener* nfc_listener;
 
     FuriHalUsbInterface* usb_mode_prev;

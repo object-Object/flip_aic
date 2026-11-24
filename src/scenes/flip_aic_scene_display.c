@@ -4,10 +4,14 @@
 #include "../flip_aic.h"
 #include "flip_aic_scene.h"
 
-#include <protocols/felica/felica.h>
+#include <lib/nfc/protocols/felica/felica.h>
+#include <lib/nfc/protocols/iso14443_3a/iso14443_3a.h>
+#include <lib/nfc/protocols/iso15693_3/iso15693_3.h>
+#include <lib/nfc/protocols/mf_classic/mf_classic.h>
 
 enum FlipAICSceneDisplayEvent {
     FlipAICSceneDisplayEventMenu,
+    FlipAICSceneDisplayEventReadAgain, 
 };
 
 static void flip_aic_scene_display_dialog_callback(DialogExResult result, void* context) {
@@ -18,16 +22,47 @@ static void flip_aic_scene_display_dialog_callback(DialogExResult result, void* 
     case DialogExResultLeft:
         view_dispatcher_send_custom_event(app->view_dispatcher, FlipAICSceneDisplayEventMenu);
         break;
-
     case DialogExResultCenter:
-        if (cardio_is_connected()) {
-            const FelicaData* data = nfc_device_get_data(app->nfc_device, NfcProtocolFelica);
-            cardio_send_report(CardioReportIdFeliCa, data->idm.data);
-        }
+        // 现在按下中间按键，触发“再次读卡”事件
+        view_dispatcher_send_custom_event(app->view_dispatcher, FlipAICSceneDisplayEventReadAgain);
         break;
-
     default:
         break;
+    }
+}
+
+// Mifare/ISO14443-3A 系列：把卡号补齐成 ISO15693 的 8 字节格式
+// E0 04 01 00 + UID 的最后 4 字节（4 字节卡即完整 UID）
+static void flip_aic_scene_display_mifare(FlipAIC* app, FuriString* text, const Iso14443_3aData* data) {
+    // 明确标注：这一屏是 Mifare UID 模拟成 ISO15693，不是真实 ISO15693 卡
+    dialog_ex_set_header(app->dialog_ex, "MIFARE simed e-pass", 0, 0, AlignLeft, AlignTop);
+
+    if (data == NULL || data->uid_len < 4) {
+        furi_string_printf(text, "UID: N/A");
+        return;
+    }
+
+    // 4 字节 UID 直接用；7/10 字节 UID 取最后 4 字节（与 iso14443_3a_get_cuid 一致）
+    const uint8_t* tail = &data->uid[data->uid_len - 4];
+    uint8_t iso_uid[8] = {0xE0, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+    memcpy(&iso_uid[4], tail, 4);
+
+    char access_code_str[21];
+    aic_access_code_iso15693(iso_uid, access_code_str);
+
+    furi_string_printf(text,
+        "KID:%.4s %.4s %.4s %.4s",
+        access_code_str, access_code_str+4, access_code_str+8, access_code_str+12
+    );
+
+    furi_string_cat_str(text, "\nUID:");
+    furi_string_cat_hex(text, iso_uid, sizeof(iso_uid), "", 1);
+
+    furi_string_cat_str(text, "\nMF-UID:");
+    furi_string_cat_hex(text, tail, 4, "", 1);
+
+    if (cardio_is_connected()) {
+        cardio_send_report(CardioReportIdISO15693, iso_uid);
     }
 }
 
@@ -35,31 +70,85 @@ void flip_aic_scene_display_on_enter(void* context) {
     furi_assert(context);
     FlipAIC* app = context;
 
-    const FelicaData* data = nfc_device_get_data(app->nfc_device, NfcProtocolFelica);
-
-    AICVendor vendor = aic_vendor(data);
-    const char* vendor_name = aic_vendor_name_short(vendor);
-    dialog_ex_set_header(app->dialog_ex, vendor_name, 0, 0, AlignLeft, AlignTop);
-
+    NfcProtocol protocol = nfc_device_get_protocol(app->nfc_device);
     FuriString* text = furi_string_alloc();
 
-    uint8_t access_code[10];
-    aic_access_code(data, access_code);
-    furi_string_cat_str(text, "Access code:\n");
-    furi_string_cat_hex(text, access_code, sizeof(access_code), " ", 2);
+    if (protocol == NfcProtocolFelica) {
+        const FelicaData* data = nfc_device_get_data(app->nfc_device, NfcProtocolFelica);
 
-    furi_string_cat_str(text, "\nIDm: ");
-    furi_string_cat_hex(text, data->idm.data, sizeof(data->idm.data), ":", 1);
+        char access_number[21];
+        bool has_access_number = aic_get_access_number(data, access_number);
 
-    // TODO: make another page for this? (it overflows)
-    // furi_string_cat_str(text, "\nPMm: ");
-    // furi_string_cat_hex(text, data->pmm.data, sizeof(data->pmm.data), ":", 1);
+        // 有 access code 的 AIC 卡显示 Amusement IC，其他 FeliCa 显示 e-amusement pass
+        dialog_ex_set_header(
+            app->dialog_ex,
+            has_access_number ? "Amusement IC" : "e-amusement pass",
+            0,
+            0,
+            AlignLeft,
+            AlignTop);
 
+        char konami_id[17];
+        aic_access_code_felica_konami(data->idm.data, konami_id);
+
+        if (has_access_number) {
+            // AIC 卡（FeliCa Lite / Lite-S）：显示 20 位 access number
+            // 按 12 + 8 拆成两行，避免单行溢出
+            furi_string_printf(text,
+                "AN:%.4s %.4s %.4s %.4s %.4s\nKID:%.4s %.4s %.4s %.4s\nIDm:",
+                access_number, access_number+4, access_number+8,
+                access_number+12, access_number+16,
+                konami_id, konami_id+4, konami_id+8, konami_id+12
+            );
+            furi_string_cat_hex(text, data->idm.data, sizeof(data->idm.data), "", 1);
+        } else {
+            // 不支持 AIC 解析的卡（Suica 等）：不显示 access number
+            furi_string_printf(text,
+                "KID:%.4s %.4s %.4s %.4s\nIDm:",
+                konami_id, konami_id+4, konami_id+8, konami_id+12
+            );
+            furi_string_cat_hex(text, data->idm.data, sizeof(data->idm.data), ":", 1);
+        }
+
+        // 【核心修改】进入界面时，若 USB 已连接，则直接自动发送！
+        if (cardio_is_connected()) {
+            cardio_send_report(CardioReportIdFeliCa, data->idm.data);
+        }
+    } 
+    else if (protocol == NfcProtocolIso15693_3) {
+        const Iso15693_3Data* data = nfc_device_get_data(app->nfc_device, NfcProtocolIso15693_3);
+        dialog_ex_set_header(app->dialog_ex, "e-amusement pass", 0, 0, AlignLeft, AlignTop);
+
+        char access_code_str[21];
+        aic_access_code_iso15693(data->uid, access_code_str);
+        
+        furi_string_printf(text, 
+            "KID:%.4s %.4s %.4s %.4s",
+            access_code_str, access_code_str+4, access_code_str+8, access_code_str+12
+        );
+
+        furi_string_cat_str(text, "\nUID: ");
+        furi_string_cat_hex(text, data->uid, sizeof(data->uid), ":", 1);
+
+        if (cardio_is_connected()) {
+            cardio_send_report(CardioReportIdISO15693, data->uid);
+        }
+    }
+    else if (protocol == NfcProtocolIso14443_3a ||
+             nfc_protocol_has_parent(protocol, NfcProtocolIso14443_3a)) {
+        // 实时读取（ISO14443-3A）与模拟/回放（Mifare Classic 等已保存的卡）
+        // 都走这里：取出底层 14443-3A 的 UID，再拼成 ISO15693 格式。
+        const Iso14443_3aData* data =
+            nfc_device_get_data(app->nfc_device, NfcProtocolIso14443_3a);
+        flip_aic_scene_display_mifare(app, text, data);
+    }
+    
     dialog_ex_set_text(app->dialog_ex, furi_string_get_cstr(text), 0, 12, AlignLeft, AlignTop);
     furi_string_free(text);
 
+    // 更新按钮文字
     dialog_ex_set_left_button_text(app->dialog_ex, "Menu");
-    dialog_ex_set_center_button_text(app->dialog_ex, "CardIO");
+    dialog_ex_set_center_button_text(app->dialog_ex, "Read Next"); 
 
     dialog_ex_set_result_callback(app->dialog_ex, flip_aic_scene_display_dialog_callback);
     dialog_ex_set_context(app->dialog_ex, app);
@@ -70,15 +159,20 @@ void flip_aic_scene_display_on_enter(void* context) {
 bool flip_aic_scene_display_on_event(void* context, SceneManagerEvent event) {
     furi_assert(context);
     FlipAIC* app = context;
-
     if (event.type == SceneManagerEventTypeCustom) {
-        switch (event.event) {
-        case FlipAICSceneDisplayEventMenu:
+        if (event.event == FlipAICSceneDisplayEventMenu) {
             scene_manager_search_and_switch_to_previous_scene(app->scene_manager, FlipAICSceneMenu);
             return true;
+        } else if (event.event == FlipAICSceneDisplayEventReadAgain) {
+            // 接收到再次读卡请求，直接退回到 Read 场景，重新启动 NFC 扫描
+            scene_manager_search_and_switch_to_previous_scene(app->scene_manager, FlipAICSceneRead);
+            return true;
         }
+    } else if (event.type == SceneManagerEventTypeBack) {
+        // 物理返回键依然退回到主菜单
+        scene_manager_search_and_switch_to_previous_scene(app->scene_manager, FlipAICSceneMenu);
+        return true;
     }
-
     return false;
 }
 
