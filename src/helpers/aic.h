@@ -375,3 +375,52 @@ static inline void aic_access_code_iso15693(const uint8_t* uid, char* out_access
 static inline void aic_access_code_felica_konami(const uint8_t* idm, char* out_access_code) {
     aic_access_code_konami_core(idm, 2, out_access_code);
 }
+
+// Amusement IC (AIC) support, ported from the firmware's amusement_ic parser.
+// Only FeliCa Lite / Lite-S cards with a known vendor DFC carry an AIC access code.
+// Suica and other FeliCa Standard cards deliberately return false here.
+static inline bool aic_is_supported_card(const FelicaData* data) {
+    if(data == NULL) return false;
+
+    const uint8_t ic_type = data->pmm.data[1];
+    if(ic_type != 0xF0 && ic_type != 0xF1) return false; // Lite / Lite-S only
+
+    if(data->data.fs.id.data[8] != 0x00) return false; // DFC high byte
+
+    switch(data->data.fs.id.data[9]) {
+    case 0x2A: // Bandai Namco Entertainment (Lite-S)
+    case 0x3A: // Bandai Namco Games (Lite)
+    case 0x68: // Konami (Lite-S)
+    case 0x78: // SEGA (Lite-S)
+    case 0x79: // Taito NESiCA
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Decrypts SPAD0 and returns the 20-digit BCD access number (company code 5xx +
+// encoded data + CRC). out_access_number must hold at least 21 bytes.
+static inline bool aic_get_access_number(const FelicaData* data, char* out_access_number) {
+    if(data == NULL || out_access_number == NULL) return false;
+    if(!aic_is_supported_card(data)) return false;
+
+    // SPAD0 must actually have been read, otherwise the decrypted data is garbage
+    if(data->blocks_read == 0) return false;
+
+    // decrypted SPAD0 bytes 6..15 == the 10-byte / 20-digit access code
+    uint8_t access_code[10];
+    aic_access_code(data, access_code);
+
+    if((access_code[0] >> 4) != 5) return false; // AIC company code always starts with 5
+
+    for(int i = 0; i < 10; i++) {
+        uint8_t hi = (access_code[i] >> 4) & 0x0F;
+        uint8_t lo = access_code[i] & 0x0F;
+        if(hi > 9 || lo > 9) return false; // not BCD
+        out_access_number[i * 2] = (char)('0' + hi);
+        out_access_number[i * 2 + 1] = (char)('0' + lo);
+    }
+    out_access_number[20] = '\0';
+    return true;
+}

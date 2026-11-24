@@ -35,7 +35,7 @@ static void flip_aic_scene_display_dialog_callback(DialogExResult result, void* 
 // E0 04 01 00 + UID 的最后 4 字节（4 字节卡即完整 UID）
 static void flip_aic_scene_display_mifare(FlipAIC* app, FuriString* text, const Iso14443_3aData* data) {
     // 明确标注：这一屏是 Mifare UID 模拟成 ISO15693，不是真实 ISO15693 卡
-    dialog_ex_set_header(app->dialog_ex, "e-amusement [MF]", 0, 0, AlignLeft, AlignTop);
+    dialog_ex_set_header(app->dialog_ex, "MIFARE simed e-pass", 0, 0, AlignLeft, AlignTop);
 
     if (data == NULL || data->uid_len < 4) {
         furi_string_printf(text, "UID: N/A");
@@ -75,28 +75,40 @@ void flip_aic_scene_display_on_enter(void* context) {
 
     if (protocol == NfcProtocolFelica) {
         const FelicaData* data = nfc_device_get_data(app->nfc_device, NfcProtocolFelica);
-        AICVendor vendor = aic_vendor(data);
-        const char* vendor_name = aic_vendor_name_short(vendor);
-        dialog_ex_set_header(app->dialog_ex, vendor_name, 0, 0, AlignLeft, AlignTop);
 
-        uint8_t access_code[10];
-        aic_access_code(data, access_code);
-        char aic_str[21];
-        for(int i = 0; i < 10; i++) {
-            snprintf(aic_str + i * 2, 3, "%02X", access_code[i]);
-        }
+        char access_number[21];
+        bool has_access_number = aic_get_access_number(data, access_number);
 
+        // 有 access code 的 AIC 卡显示 Amusement IC，其他 FeliCa 显示 e-amusement pass
+        dialog_ex_set_header(
+            app->dialog_ex,
+            has_access_number ? "Amusement IC" : "e-amusement pass",
+            0,
+            0,
+            AlignLeft,
+            AlignTop);
 
         char konami_id[17];
         aic_access_code_felica_konami(data->idm.data, konami_id);
-        furi_string_printf(text, 
-            "%.4s %.4s %.4s %.4s %.4s\nKID:%.4s %.4s %.4s %.4s",
-            aic_str, aic_str+4, aic_str+8, aic_str+12, aic_str+16,
-            konami_id, konami_id+4, konami_id+8, konami_id+12
-        );
 
-        furi_string_cat_str(text, "\nIDm:");
-        furi_string_cat_hex(text, data->idm.data, sizeof(data->idm.data), ":", 1);
+        if (has_access_number) {
+            // AIC 卡（FeliCa Lite / Lite-S）：显示 20 位 access number
+            // 按 12 + 8 拆成两行，避免单行溢出
+            furi_string_printf(text,
+                "AN:%.4s %.4s %.4s %.4s %.4s\nKID:%.4s %.4s %.4s %.4s\nIDm:",
+                access_number, access_number+4, access_number+8,
+                access_number+12, access_number+16,
+                konami_id, konami_id+4, konami_id+8, konami_id+12
+            );
+            furi_string_cat_hex(text, data->idm.data, sizeof(data->idm.data), "", 1);
+        } else {
+            // 不支持 AIC 解析的卡（Suica 等）：不显示 access number
+            furi_string_printf(text,
+                "KID:%.4s %.4s %.4s %.4s\nIDm:",
+                konami_id, konami_id+4, konami_id+8, konami_id+12
+            );
+            furi_string_cat_hex(text, data->idm.data, sizeof(data->idm.data), ":", 1);
+        }
 
         // 【核心修改】进入界面时，若 USB 已连接，则直接自动发送！
         if (cardio_is_connected()) {
@@ -105,7 +117,7 @@ void flip_aic_scene_display_on_enter(void* context) {
     } 
     else if (protocol == NfcProtocolIso15693_3) {
         const Iso15693_3Data* data = nfc_device_get_data(app->nfc_device, NfcProtocolIso15693_3);
-        dialog_ex_set_header(app->dialog_ex, "e-amusement", 0, 0, AlignLeft, AlignTop);
+        dialog_ex_set_header(app->dialog_ex, "e-amusement pass", 0, 0, AlignLeft, AlignTop);
 
         char access_code_str[21];
         aic_access_code_iso15693(data->uid, access_code_str);
