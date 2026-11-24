@@ -5,6 +5,7 @@
 #include "flip_aic_scene.h"
 
 #include <lib/nfc/protocols/felica/felica.h>
+#include <lib/nfc/protocols/iso14443_3a/iso14443_3a.h>
 #include <lib/nfc/protocols/iso15693_3/iso15693_3.h>
 #include <lib/nfc/protocols/mf_classic/mf_classic.h>
 
@@ -27,6 +28,41 @@ static void flip_aic_scene_display_dialog_callback(DialogExResult result, void* 
         break;
     default:
         break;
+    }
+}
+
+// Mifare/ISO14443-3A 系列：把卡号补齐成 ISO15693 的 8 字节格式
+// E0 04 01 00 + UID 的最后 4 字节（4 字节卡即完整 UID）
+static void flip_aic_scene_display_mifare(FlipAIC* app, FuriString* text, const Iso14443_3aData* data) {
+    // 明确标注：这一屏是 Mifare UID 模拟成 ISO15693，不是真实 ISO15693 卡
+    dialog_ex_set_header(app->dialog_ex, "e-amusement [MF]", 0, 0, AlignLeft, AlignTop);
+
+    if (data == NULL || data->uid_len < 4) {
+        furi_string_printf(text, "UID: N/A");
+        return;
+    }
+
+    // 4 字节 UID 直接用；7/10 字节 UID 取最后 4 字节（与 iso14443_3a_get_cuid 一致）
+    const uint8_t* tail = &data->uid[data->uid_len - 4];
+    uint8_t iso_uid[8] = {0xE0, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+    memcpy(&iso_uid[4], tail, 4);
+
+    char access_code_str[21];
+    aic_access_code_iso15693(iso_uid, access_code_str);
+
+    furi_string_printf(text,
+        "KID:%.4s %.4s %.4s %.4s",
+        access_code_str, access_code_str+4, access_code_str+8, access_code_str+12
+    );
+
+    furi_string_cat_str(text, "\nUID:");
+    furi_string_cat_hex(text, iso_uid, sizeof(iso_uid), "", 1);
+
+    furi_string_cat_str(text, "\nMF-UID:");
+    furi_string_cat_hex(text, tail, 4, "", 1);
+
+    if (cardio_is_connected()) {
+        cardio_send_report(CardioReportIdISO15693, iso_uid);
     }
 }
 
@@ -85,6 +121,14 @@ void flip_aic_scene_display_on_enter(void* context) {
         if (cardio_is_connected()) {
             cardio_send_report(CardioReportIdISO15693, data->uid);
         }
+    }
+    else if (protocol == NfcProtocolIso14443_3a ||
+             nfc_protocol_has_parent(protocol, NfcProtocolIso14443_3a)) {
+        // 实时读取（ISO14443-3A）与模拟/回放（Mifare Classic 等已保存的卡）
+        // 都走这里：取出底层 14443-3A 的 UID，再拼成 ISO15693 格式。
+        const Iso14443_3aData* data =
+            nfc_device_get_data(app->nfc_device, NfcProtocolIso14443_3a);
+        flip_aic_scene_display_mifare(app, text, data);
     }
     
     dialog_ex_set_text(app->dialog_ex, furi_string_get_cstr(text), 0, 12, AlignLeft, AlignTop);

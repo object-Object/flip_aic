@@ -3,6 +3,7 @@
 
 #include <lib/nfc/protocols/felica/felica.h>
 #include <lib/nfc/protocols/felica/felica_poller.h>
+#include <lib/nfc/protocols/iso14443_3a/iso14443_3a_poller.h>
 #include <lib/nfc/protocols/iso15693_3/iso15693_3_poller.h>
 
 enum PollerResult {
@@ -15,6 +16,18 @@ enum PollerResult {
 static void flip_aic_scene_read_timer_callback(void* context) {
     FlipAIC* app = context;
     view_dispatcher_send_custom_event(app->view_dispatcher, PollerResultSwitch);
+}
+
+// 依序輪換：FeliCa -> ISO15693 -> Mifare (ISO14443-3A) -> FeliCa
+static NfcProtocol flip_aic_scene_read_next_protocol(NfcProtocol protocol) {
+    switch(protocol) {
+    case NfcProtocolFelica:
+        return NfcProtocolIso15693_3;
+    case NfcProtocolIso15693_3:
+        return NfcProtocolIso14443_3a;
+    default:
+        return NfcProtocolFelica;
+    }
 }
 
 static NfcCommand flip_aic_scene_read_poller_callback(NfcGenericEvent event, void* context) {
@@ -42,6 +55,15 @@ static NfcCommand flip_aic_scene_read_poller_callback(NfcGenericEvent event, voi
             view_dispatcher_send_custom_event(app->view_dispatcher, PollerResultSuccess);
             return NfcCommandStop;
         } else if (poller_event->type == Iso15693_3PollerEventTypeError) {
+            return NfcCommandContinue;
+        }
+    } else if (event.protocol == NfcProtocolIso14443_3a) {
+        // 只做防衝突/選卡，拿到 UID 即停止，不讀取任何資料塊
+        Iso14443_3aPollerEvent* poller_event = event.event_data;
+        if (poller_event->type == Iso14443_3aPollerEventTypeReady) {
+            view_dispatcher_send_custom_event(app->view_dispatcher, PollerResultSuccess);
+            return NfcCommandStop;
+        } else if (poller_event->type == Iso14443_3aPollerEventTypeError) {
             return NfcCommandContinue;
         }
     }
@@ -86,10 +108,10 @@ bool flip_aic_scene_read_on_event(void* context, SceneManagerEvent event) {
             if (app->nfc_poller) {
                 nfc_poller_stop(app->nfc_poller);
                 nfc_poller_free(app->nfc_poller);
-                
-                // 翻轉目前的協定
-                app->current_protocol = (app->current_protocol == NfcProtocolFelica) ? NfcProtocolIso15693_3 : NfcProtocolFelica;
-                
+
+                // 輪換到下一個協定
+                app->current_protocol = flip_aic_scene_read_next_protocol(app->current_protocol);
+
                 // 重新啟動另一個協定的掃描
                 app->nfc_poller = nfc_poller_alloc(app->nfc, app->current_protocol);
                 nfc_poller_start(app->nfc_poller, flip_aic_scene_read_poller_callback, app);
